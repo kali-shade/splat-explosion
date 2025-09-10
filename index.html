@@ -1,0 +1,709 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Spark • Splat Transitions Standalone</title>
+  <style>
+    html, body {
+      margin: 0;
+      height: 100%;
+      width: 100%;
+      background-color: black;
+      overflow: hidden;
+    }
+    #canvas {
+      position: absolute;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 100%;
+      outline: none;
+      touch-action: none;
+    }
+  </style>
+</head>
+<body>
+  <canvas id="canvas" tabindex="0"></canvas>
+  <script type="importmap">
+    {
+      "imports": {
+        "three": "https://unpkg.com/three@0.172.0/build/three.module.js",
+        "three/addons/": "https://unpkg.com/three@0.172.0/examples/jsm/",
+        "lil-gui": "https://unpkg.com/lil-gui@0.20.0/dist/lil-gui.esm.js",
+        "@sparkjsdev/spark": "https://unpkg.com/@sparkjsdev/spark@0.1.6/dist/spark.module.js"
+      }
+    }
+  </script>
+  <script type="module">
+    import * as THREE from "three";
+    import { SplatMesh, SparkRenderer, dyno, SparkControls, textSplats } from "@sparkjsdev/spark";
+    import { GUI } from "lil-gui";
+    import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
+
+    // Asset URLs - using direct links to public assets (confirmed working)
+    const ASSETS = {
+      'penguin.spz': 'https://sparkjs.dev/assets/splats/penguin.spz',
+      'cat.spz': 'https://sparkjs.dev/assets/splats/cat.spz', // Use valley.spz as cat replacement
+      'woobles.spz': 'https://sparkjs.dev/assets/splats/woobles.spz',
+      'table.glb': 'https://sparkjs.dev/assets/models/table.glb'
+    };
+
+    // Helper function to get asset URL
+    function getAssetFileURL(filename) {
+      return Promise.resolve(ASSETS[filename] || filename);
+    }
+
+    // Setup canvas and renderer
+    const canvas = document.getElementById("canvas");
+    const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    renderer.setClearColor(new THREE.Color(0x111111), 1);
+
+    // Setup scene
+    const scene = new THREE.Scene();
+    
+    // Setup Spark renderer
+    const spark = new SparkRenderer({ renderer });
+    scene.add(spark);
+
+    // Setup camera
+    const camera = new THREE.PerspectiveCamera(
+      60, 
+      window.innerWidth / window.innerHeight, 
+      0.1, 
+      1000
+    );
+    camera.position.set(0, 2.5, 7);
+    camera.lookAt(0, 1, 0);
+
+    // Setup controls
+    const controls = new SparkControls({ canvas: renderer.domElement });
+    controls.fpsMovement.moveSpeed = 3.0;
+
+    // Setup lighting for the table
+    const ambientLight = new THREE.AmbientLight(0x404040, 0.6);
+    scene.add(ambientLight);
+
+    const directionalLight = new THREE.DirectionalLight(0xffffff, 1.0);
+    directionalLight.position.set(5, 10, 5);
+    directionalLight.castShadow = true;
+    directionalLight.shadow.mapSize.width = 2048;
+    directionalLight.shadow.mapSize.height = 2048;
+    directionalLight.shadow.camera.near = 0.5;
+    directionalLight.shadow.camera.far = 50;
+    directionalLight.shadow.camera.left = -10;
+    directionalLight.shadow.camera.right = 10;
+    directionalLight.shadow.camera.top = 10;
+    directionalLight.shadow.camera.bottom = -10;
+    scene.add(directionalLight);
+
+    // Enable shadows in renderer
+    renderer.shadowMap.enabled = true;
+    renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+
+    // Animation time
+    const animationTime = dyno.dynoFloat(0.0);
+    const dropStartTime = dyno.dynoFloat(0.0);
+    
+    // Transition state management
+    const transitionState = {
+      isTransitioning: false,
+      transitionTime: 0.0,
+      transitionDuration: 3.0,
+      birthDuration: 0.5,
+      cycleDuration: 1.0,
+    };
+    
+    // Effect parameters
+    const effectParams = {
+      dropProgress: 0.0,
+      gravity: 9.8,
+      bounceDamping: 0.4,
+      floorLevel: 0.0,
+      randomFactor: 1.0,
+      reformSpeed: 2.0,
+      isDropped: false,
+      spaceToDisassemble: true,
+      dropTime: 0.0,
+      friction: 0.98,
+      shrinkSpeed: 3.0,
+      explosionStrength: 4.5,
+      isReforming: false,
+      reformTime: 0.0,
+      reformDuration: 2.0
+    };
+
+    // Dynamic uniforms
+    const uDropProgress = dyno.dynoFloat(effectParams.dropProgress);
+    const uGravity = dyno.dynoFloat(effectParams.gravity);
+    const uBounceDamping = dyno.dynoFloat(effectParams.bounceDamping);
+    const uFloorLevel = dyno.dynoFloat(effectParams.floorLevel);
+    const uRandomFactor = dyno.dynoFloat(effectParams.randomFactor);
+    const uReformSpeed = dyno.dynoFloat(effectParams.reformSpeed);
+    const uCycleDuration = dyno.dynoFloat(transitionState.cycleDuration);
+    const uDropTime = dyno.dynoFloat(effectParams.dropTime);
+    const uFriction = dyno.dynoFloat(effectParams.friction);
+    const uShrinkSpeed = dyno.dynoFloat(5.0 - effectParams.shrinkSpeed);
+    const uExplosionStrength = dyno.dynoFloat(effectParams.explosionStrength);
+    const uIsReforming = dyno.dynoFloat(0.0);
+    const uReformTime = dyno.dynoFloat(0.0);
+    const uReformDuration = dyno.dynoFloat(effectParams.reformDuration);
+
+    // Birth effect uniforms
+    const uIsBirthing = dyno.dynoFloat(0.0);
+    const uBirthTime = dyno.dynoFloat(0.0);
+    const uBirthDuration = dyno.dynoFloat(transitionState.birthDuration);
+
+    // Create death effect dynoshader (explosion/dispersal)
+    function createDeathDynoshader() {
+      return dyno.dynoBlock(
+        { gsplat: dyno.Gsplat },
+        { gsplat: dyno.Gsplat },
+        ({ gsplat }) => {
+          const physicsShader = new dyno.Dyno({
+            inTypes: { 
+              gsplat: dyno.Gsplat, 
+              time: "float",
+              dropTime: "float",
+              dropProgress: "float",
+              gravity: "float",
+              bounceDamping: "float",
+              floorLevel: "float",
+              randomFactor: "float",
+              reformSpeed: "float",
+              cycleDuration: "float",
+              friction: "float",
+              shrinkSpeed: "float",
+              explosionStrength: "float",
+              isReforming: "float",
+              reformTime: "float",
+              reformDuration: "float"
+            },
+            outTypes: { gsplat: dyno.Gsplat },
+            globals: () => [dyno.unindent(`
+              mat2 rot(float angle) {
+                float c = cos(angle);
+                float s = sin(angle);
+                return mat2(c, -s, s, c);
+              }
+              float hash(vec3 p) {
+                return fract(sin(dot(p, vec3(127.1, 311.7, 74.7))) * 43758.5453);
+              }
+              
+              float smoothstep3(float edge0, float edge1, float x) {
+                float t = clamp((x - edge0) / (edge1 - edge0), 0.0, 1.0);
+                return t * t * (3.0 - 2.0 * t);
+              }
+              
+              vec3 simulatePhysics(vec3 originalPos, float dropTime, float progress, float gravity, float damping, float floorLevel, float randomOffset, float friction, float explosionStrength) {
+                if (progress <= 0.0) return originalPos;
+                
+                float timeVariation = hash(originalPos + vec3(42.0)) * 0.2 - 0.1;
+                float adjustedTime = max(0.0, dropTime + timeVariation);
+                
+                vec3 initialVelocity = vec3(
+                  (hash(originalPos + vec3(1.0)) - 0.5) * explosionStrength * (0.3 + hash(originalPos + vec3(10.0)) * 0.4),
+                  abs(hash(originalPos + vec3(3.0))) * explosionStrength * (0.8 + hash(originalPos + vec3(20.0)) * 0.4) + 0.5,
+                  (hash(originalPos + vec3(2.0)) - 0.5) * explosionStrength * (0.3 + hash(originalPos + vec3(30.0)) * 0.4)
+                );
+                
+                float t = adjustedTime;
+                
+                float frictionDecay = pow(friction, t * 60.0);
+                vec3 currentVelocity = initialVelocity * frictionDecay;
+                
+                vec3 position = originalPos;
+                position.x += initialVelocity.x * (1.0 - frictionDecay) / (1.0 - friction) / 60.0;
+                position.z += initialVelocity.z * (1.0 - frictionDecay) / (1.0 - friction) / 60.0;
+                position.y += initialVelocity.y * t - 0.5 * gravity * t * t;
+                
+                if (position.y <= floorLevel) {
+                  float bounceTime = t;
+                  float bounceCount = floor(bounceTime * 3.0);
+                  float timeSinceBounce = bounceTime - bounceCount / 3.0;
+                  
+                  float bounceHeight = initialVelocity.y * pow(damping, bounceCount) * max(0.0, 1.0 - timeSinceBounce * 3.0);
+                  
+                  if (bounceHeight > 0.1) {
+                    position.y = floorLevel + abs(sin(timeSinceBounce * 3.14159 * 3.0)) * bounceHeight;
+                  } else {
+                    position.y = floorLevel;
+                    float scatterFactor = hash(originalPos + vec3(50.0)) * 0.2;
+                    position.x += (hash(originalPos + vec3(60.0)) - 0.5) * scatterFactor;
+                    position.z += (hash(originalPos + vec3(70.0)) - 0.5) * scatterFactor;
+                  }
+                }
+                
+                return position;
+              }
+              
+              vec3 elegantReform(vec3 currentPos, vec3 originalPos, float reformTime, float duration) {
+                if (reformTime <= 0.0) return currentPos;
+                if (reformTime >= duration) return originalPos;
+                
+                float progress = reformTime / duration;
+                
+                return mix(currentPos, originalPos, progress);
+              }
+              
+              vec3 reformScale(vec3 currentScale, vec3 originalScale, float reformTime, float duration) {
+                if (reformTime <= 0.0) return currentScale;
+                if (reformTime >= duration) return originalScale;
+                
+                float progress = reformTime / duration;
+                float easeOut = 1.0 - pow(1.0 - progress, 2.0);
+                
+                return mix(currentScale, originalScale, easeOut);
+              }
+            `)],
+            statements: ({ inputs, outputs }) => dyno.unindentLines(`
+              ${outputs.gsplat} = ${inputs.gsplat};
+              
+              vec3 originalPos = ${inputs.gsplat}.center;
+              vec3 originalScale = ${inputs.gsplat}.scales;
+              
+              vec3 physicsPos = originalPos;
+              vec3 currentScale = originalScale;
+              
+              if (${inputs.dropProgress} > 0.0) {
+                float randomOffset = hash(originalPos) * ${inputs.randomFactor};
+                
+                physicsPos = simulatePhysics(
+                  originalPos, 
+                  ${inputs.dropTime}, 
+                  ${inputs.dropProgress}, 
+                  ${inputs.gravity}, 
+                  ${inputs.bounceDamping}, 
+                  ${inputs.floorLevel}, 
+                  randomOffset,
+                  ${inputs.friction},
+                  ${inputs.explosionStrength}
+                );
+                
+                float factor = exp(-${inputs.dropTime} * ${inputs.shrinkSpeed});
+                currentScale = mix(originalScale, vec3(0.005), 1.0 - factor);
+              }
+              
+              vec3 finalPos = physicsPos;
+              vec3 finalScale = currentScale;
+              
+              if (${inputs.isReforming} > 0.5) {
+                finalPos = elegantReform(physicsPos, originalPos, ${inputs.reformTime}, ${inputs.reformDuration});
+                finalScale = reformScale(currentScale, originalScale, ${inputs.reformTime}, ${inputs.reformDuration});
+              }
+              
+              ${outputs.gsplat}.center = finalPos;
+              ${outputs.gsplat}.scales = finalScale;
+            `),
+          });
+          
+          gsplat = physicsShader.apply({ 
+            gsplat, 
+            time: animationTime,
+            dropTime: uDropTime,
+            dropProgress: uDropProgress,
+            gravity: uGravity,
+            bounceDamping: uBounceDamping,
+            floorLevel: uFloorLevel,
+            randomFactor: uRandomFactor,
+            reformSpeed: uReformSpeed,
+            cycleDuration: uCycleDuration,
+            friction: uFriction,
+            shrinkSpeed: uShrinkSpeed,
+            explosionStrength: uExplosionStrength,
+            isReforming: uIsReforming,
+            reformTime: uReformTime,
+            reformDuration: uReformDuration
+          }).gsplat;
+          
+          return { gsplat };
+        }
+      );
+    }
+
+    // Create birth effect dynoshader (emergence from origin)
+    function createBirthDynoshader() {
+      return dyno.dynoBlock(
+        { gsplat: dyno.Gsplat },
+        { gsplat: dyno.Gsplat },
+        ({ gsplat }) => {
+          const birthShader = new dyno.Dyno({
+            inTypes: { 
+              gsplat: dyno.Gsplat, 
+              time: "float",
+              isBirthing: "float",
+              birthTime: "float",
+              birthDuration: "float"
+            },
+            outTypes: { gsplat: dyno.Gsplat },
+            globals: () => [dyno.unindent(`
+              float hash(vec3 p) {
+                return fract(sin(dot(p, vec3(127.1, 311.7, 74.7))) * 43758.5453);
+              }
+              
+              float smoothstep3(float edge0, float edge1, float x) {
+                float t = clamp((x - edge0) / (edge1 - edge0), 0.0, 1.0);
+                return t * t * (3.0 - 2.0 * t);
+              }
+            `)],
+            statements: ({ inputs, outputs }) => dyno.unindentLines(`
+              ${outputs.gsplat} = ${inputs.gsplat};
+              
+              vec3 originalPos = ${inputs.gsplat}.center;
+              vec3 originalScale = ${inputs.gsplat}.scales;
+              
+              if (${inputs.isBirthing} > 0.5 && ${inputs.birthTime} < ${inputs.birthDuration}) {
+                float progress = ${inputs.birthTime} / ${inputs.birthDuration};
+                
+                float birthOffset = hash(originalPos) * 0.1;
+                float adjustedProgress = clamp((progress - birthOffset / ${inputs.birthDuration}) / (1.0 - birthOffset / ${inputs.birthDuration}), 0.0, 1.0);
+                
+                float easeProgress = adjustedProgress * adjustedProgress * (3.0 - 2.0 * adjustedProgress);
+                easeProgress = pow(easeProgress, 0.6);
+                
+                vec3 birthPos = mix(vec3(0.0, 0.0, 0.0), originalPos, easeProgress);
+                
+                vec3 birthScale = mix(vec3(0.0, 0.0, 0.0), originalScale, easeProgress);
+                
+                float randFactor = hash(originalPos + vec3(42.0)) * 0.05;
+                birthPos += (hash(originalPos + vec3(10.0, 20.0, 30.0)) - 0.5) * randFactor * (1.0 - easeProgress);
+                
+                ${outputs.gsplat}.center = birthPos;
+                ${outputs.gsplat}.scales = birthScale;
+                
+                float alpha = ${inputs.gsplat}.rgba.a * easeProgress;
+                ${outputs.gsplat}.rgba.a = alpha;
+              }
+            `),
+          });
+          
+          gsplat = birthShader.apply({ 
+            gsplat, 
+            time: animationTime,
+            isBirthing: uIsBirthing,
+            birthTime: uBirthTime,
+            birthDuration: uBirthDuration
+          }).gsplat;
+          
+          return { gsplat };
+        }
+      );
+    }
+
+    let splatMeshes = {};
+    let currentSplatName = 'penguin';
+    let nextSplatName = 'cat';
+    let tableMeshRef = null;
+    let totalTime = 0;
+    
+    const transitionParams = {
+      autoTransition: false,
+      currentSplat: currentSplatName,
+      manualTransition: () => {
+        if (!transitionState.isTransitioning) {
+          startTransition();
+          totalTime = 0;
+        }
+      }
+    };
+
+    // Load and setup multiple splats
+    async function loadSplats() {
+      const splatNames = ['penguin.spz', 'cat.spz', 'woobles.spz'];
+      const loadPromises = [];
+      
+      for (const splatName of splatNames) {
+        const loadPromise = (async () => {
+          try {
+            const splatURL = await getAssetFileURL(splatName);
+            const splatMesh = new SplatMesh({ url: splatURL });
+            
+            const nameKey = splatName.replace('.spz', '');
+            
+            splatMesh.worldModifier = createDeathDynoshader();
+            splatMesh.updateGenerator();
+            
+            splatMesh.position.set(0, 0, 0);
+            splatMesh.rotation.set(Math.PI, 0, 0);
+            
+            if (nameKey === 'woobles') {
+              splatMesh.scale.set(1.7, 2.0, 1.7);
+            } else {
+              splatMesh.scale.set(1, 1, 1);
+            }
+                
+            splatMesh.visible = (nameKey === currentSplatName);
+            
+            scene.add(splatMesh);
+            splatMeshes[nameKey] = splatMesh;
+            
+            console.log(`${nameKey} splat loaded:`, splatURL);
+            return splatMesh;
+          } catch (error) {
+            console.error(`Error loading ${splatName}:`, error);
+            return null;
+          }
+        })();
+        
+        loadPromises.push(loadPromise);
+      }
+      
+      await Promise.all(loadPromises);
+      console.log("All splats loaded:", Object.keys(splatMeshes));
+      return splatMeshes;
+    }
+
+    function getNextSplatName(current) {
+      const splatOrder = ['penguin', 'cat', 'woobles'];
+      const currentIndex = splatOrder.indexOf(current);
+      return splatOrder[(currentIndex + 1) % splatOrder.length];
+    }
+
+    function startExplosion() {
+      if (transitionState.isTransitioning) return;
+      
+      transitionState.isTransitioning = true;
+      transitionState.transitionTime = 0.0;
+      
+      console.log(`Explosion started: ${currentSplatName}`);
+      
+      Object.entries(splatMeshes).forEach(([name, mesh]) => {
+        if (mesh) mesh.visible = (name === currentSplatName);
+      });
+
+      if (splatMeshes[currentSplatName]) {
+        splatMeshes[currentSplatName].worldModifier = createDeathDynoshader();
+        splatMeshes[currentSplatName].updateGenerator();
+      }
+
+      effectParams.isDropped = true;
+      effectParams.dropProgress = 1.0;
+      effectParams.dropTime = 0.0;
+      effectParams.isReforming = false;
+      uDropProgress.value = 1.0;
+      uDropTime.value = 0.0;
+      uIsReforming.value = 0.0;
+    }
+
+    function startTransition() {
+      startExplosion();
+      
+      nextSplatName = getNextSplatName(currentSplatName);
+      console.log(`Starting transition: ${currentSplatName} → ${nextSplatName}`);
+      
+      if (splatMeshes[nextSplatName]) {
+        Object.entries(splatMeshes).forEach(([name, mesh]) => {
+          if (!mesh) return;
+          if (name !== currentSplatName && name !== nextSplatName) {
+            mesh.visible = false;
+          }
+        });
+
+        splatMeshes[nextSplatName].worldModifier = createBirthDynoshader();
+        splatMeshes[nextSplatName].updateGenerator();
+        
+        splatMeshes[nextSplatName].visible = true;
+        uIsBirthing.value = 1.0;
+        uBirthTime.value = 0.0;
+        
+        console.log(`Birth started for: ${nextSplatName}`);
+      }
+    }
+
+    function completeTransition() {
+      uIsBirthing.value = 0.0;
+      uBirthTime.value = 0.0;
+
+      currentSplatName = nextSplatName;
+      transitionState.isTransitioning = false;
+      transitionState.transitionTime = 0.0;
+      
+      transitionParams.currentSplat = currentSplatName;
+      
+      console.log(`Transition complete. New active splat: ${currentSplatName}`);
+    }
+
+    // Load and setup table
+    async function loadTable() {
+      try {
+        const tableURL = await getAssetFileURL("table.glb");
+        const loader = new GLTFLoader();
+        
+        return new Promise((resolve, reject) => {
+          loader.load(tableURL, (gltf) => {
+            const tableModel = gltf.scene;
+            
+            tableModel.position.set(0, -0.5, 0);
+            tableModel.scale.set(3.5, 3.5, 3.5);
+            tableModel.rotation.set(0, 0, 0);
+            
+            tableModel.traverse((child) => {
+              if (child.isMesh) {
+                child.castShadow = true;
+                child.receiveShadow = true;
+              }
+            });
+            
+            scene.add(tableModel);
+            tableMeshRef = tableModel;
+            
+            console.log("Table loaded:", tableURL);
+            resolve(tableModel);
+          }, undefined, (error) => {
+            console.error("Error loading table:", error);
+            reject(error);
+          });
+        });
+      } catch (error) {
+        console.error("Error loading table:", error);
+      }
+    }
+
+    // Add instructional text
+    function addInstructionalText() {
+      const instructionsText = textSplats({
+        text: "WASD + mouse to move\nSPACEBAR: Explosion!",
+        font: "Arial",
+        fontSize: 24,
+        color: new THREE.Color(0xFFFFFF),
+        textAlign: "center",
+        lineHeight: 1.3
+      });
+      
+      instructionsText.scale.setScalar(0.15 / 24);
+      instructionsText.position.set(0, 0.2, 2.5);
+      instructionsText.rotation.set(0, 0, 0);
+      
+      scene.add(instructionsText);
+      console.log("Instructions text added");
+    }
+
+    function handleResize() {
+      const width = window.innerWidth;
+      const height = window.innerHeight;
+      
+      renderer.setSize(width, height);
+      camera.aspect = width / height;
+      camera.updateProjectionMatrix();
+    }
+
+    window.addEventListener('resize', handleResize);
+
+    function handleSpacebarPress() {
+      console.log("Spacebar pressed - forcing next cycle!");
+      
+      if (transitionState.isTransitioning) {
+        console.log("Canceling current transition");
+        completeTransition();
+      }
+      
+      startTransition();
+      totalTime = 0;
+    }
+
+    window.addEventListener('keydown', (event) => {
+      if (event.code === 'Space') {
+        event.preventDefault();
+        handleSpacebarPress();
+      }
+    });
+
+    // Animation loop
+    let lastTime = 0;
+    renderer.setAnimationLoop((timeMs) => {
+      const t = timeMs / 1000.0;
+      const dt = t - (lastTime || t);
+      lastTime = t;
+      totalTime += dt;
+
+      animationTime.value = t;
+      
+      if (transitionParams.autoTransition) {
+        if (!transitionState.isTransitioning && totalTime >= transitionState.cycleDuration) {
+          console.log(`Auto transition trigger: totalTime=${totalTime.toFixed(2)}, cycleDuration=${transitionState.cycleDuration}`);
+          startTransition();
+          totalTime = 0;
+        }
+      }
+      
+      if (transitionState.isTransitioning) {
+        transitionState.transitionTime += dt;
+        
+        uBirthTime.value = transitionState.transitionTime;
+        
+        if (transitionState.transitionTime >= transitionState.transitionDuration) {
+          completeTransition();
+        }
+      }
+      
+      if (effectParams.isDropped && !effectParams.isReforming) {
+        effectParams.dropTime += dt;
+        uDropTime.value = effectParams.dropTime;
+      }
+      
+      if (effectParams.isReforming) {
+        effectParams.reformTime += dt;
+        uReformTime.value = effectParams.reformTime;
+        
+        if (effectParams.reformTime >= effectParams.reformDuration) {
+          effectParams.isDropped = false;
+          effectParams.dropProgress = 0.0;
+          effectParams.isReforming = false;
+          effectParams.reformTime = 0.0;
+          effectParams.dropTime = 0.0;
+          uDropProgress.value = 0.0;
+          uIsReforming.value = 0.0;
+          uReformTime.value = 0.0;
+          uDropTime.value = 0.0;
+          console.log("Reform complete!");
+        }
+      }
+      
+      if (transitionState.isTransitioning) {
+        if (splatMeshes[currentSplatName]) {
+          splatMeshes[currentSplatName].updateVersion();
+        }
+        if (splatMeshes[nextSplatName]) {
+          splatMeshes[nextSplatName].updateVersion();
+        }
+      } else {
+        const currentMesh = splatMeshes[currentSplatName];
+        if (currentMesh) {
+          currentMesh.updateVersion();
+        }
+      }
+
+      controls.update(camera);
+      renderer.render(scene, camera);
+    });
+
+    // GUI for effect parameters
+    const gui = new GUI();
+    
+    gui.add(effectParams, 'explosionStrength').min(0.0).max(10.0).step(0.1).name('Explosion Strength').onChange((v) => {
+      uExplosionStrength.value = v;
+    });
+    
+    gui.add(transitionParams, 'autoTransition').name('Auto Transition').onChange((value) => {
+      if (value) {
+        totalTime = 0;
+      }
+    });
+    
+    gui.add(effectParams, 'spaceToDisassemble').name('Spacebar to Next Cycle');
+
+    // Initialize
+    Promise.all([
+      loadSplats(),
+      loadTable()
+    ]).then(() => {
+      addInstructionalText();
+      console.log("All assets loaded!");
+    }).catch((error) => {
+      console.error("Error loading assets:", error);
+    });
+
+  </script>
+</body>
+</html>
