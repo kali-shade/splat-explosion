@@ -1,40 +1,40 @@
 # Splat Explosion
 
-Una demostración interactiva de explosiones y transiciones de Gaussian Splats usando Three.js y Spark.
+An interactive demonstration of Gaussian Splat explosions and transitions using Three.js and Spark.
 
-## Características
+## Features
 
-- **Explosiones de Splats**: Los modelos 3D se desintegran con efectos de física realistas
-- **Transiciones Suaves**: Cambio automático entre diferentes modelos 3D
-- **Controles Interactivos**: 
-  - WASD + mouse para navegar
-  - Barra espaciadora para activar explosiones
-- **Efectos Visuales**: Física de partículas, rebotes, reformación elegante
-- **Múltiples Modelos**: Pingüino, gato, woobles y una mesa 3D
+- **Splat Explosions**: 3D models disintegrate with realistic physics effects
+- **Smooth Transitions**: Automatic switching between different 3D models
+- **Interactive Controls**: 
+  - WASD + mouse to navigate
+  - Spacebar to trigger explosions
+- **Visual Effects**: Particle physics, bouncing, elegant reformation
+- **Multiple Models**: Penguin, cat, woobles, and a 3D table
 
-## Uso
+## Usage
 
-1. Abre `index.html` directamente en tu navegador
-2. Usa WASD + mouse para moverte por la escena
-3. Presiona la barra espaciadora para activar explosiones
-4. Ajusta los parámetros usando la interfaz GUI
+1. Open `index.html` directly in your browser
+2. Use WASD + mouse to move around the scene
+3. Press spacebar to trigger explosions
+4. Adjust parameters using the GUI interface
 
-## Tecnologías
+## Technologies
 
-- **Three.js**: Motor de renderizado 3D
-- **Spark**: Librería para Gaussian Splats
-- **lil-gui**: Interfaz de control
-- **Gaussian Splats**: Modelos 3D volumétricos
+- **Three.js**: 3D rendering engine
+- **Spark**: Gaussian Splats library
+- **lil-gui**: Control interface
+- **Gaussian Splats**: Volumetric 3D models
 
-## Archivos
+## Files
 
-- `index.html`: Aplicación principal con efectos avanzados
-- `indexstandalone.html`: Versión simplificada de referencia
+- `index.html`: Main application with advanced effects
+- `indexstandalone.html`: Simplified reference version
 
 ## Assets
 
-Los modelos 3D se cargan desde URLs públicas de sparkjs.dev:
-- Pingüino, gato y woobles (formato .spz)
-- Mesa 3D (formato .glb)
+3D models are loaded from public sparkjs.dev URLs:
+- Penguin, cat, and woobles (.spz format)
+- 3D table (.glb format)
 
-¡Disfruta experimentando con las explosiones de splats!
+Enjoy experimenting with splat explosions!
